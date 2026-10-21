@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>River Plane</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <main>
+    <div class="tv">
+      <canvas id="c" width="160" height="192" aria-label="River Plane"></canvas>
+    </div>
+    <section class="help">
+      <p><kbd>←</kbd><kbd>→</kbd> ou <kbd>A</kbd><kbd>D</kbd> desviam · <kbd>↑</kbd><kbd>↓</kbd> ou <kbd>W</kbd><kbd>S</kbd> mudam a velocidade · <kbd>Espaço</kbd> atira</p>
+      <p><kbd>Enter</kbd> começa · <kbd>P</kbd> pausa · <kbd>M</kbd> som · <kbd>G</kbd> tiro reto ou guiado</p>
+      <p class="scores">Navio 30 · Helicóptero 60 · Depósito 80 · Jato 100 · Ponte 500 · vida extra a cada 10.000</p>
+    </section>
+    <div class="pad" aria-label="Controles de toque">
+      <button type="button" data-hold="left" aria-label="Esquerda">◀</button>
+      <button type="button" data-hold="down" aria-label="Frear">▼</button>
+      <button type="button" data-hold="right" aria-label="Direita">▶</button>
+      <button type="button" data-hold="up" aria-label="Acelerar">▲</button>
+      <button type="button" data-hold="fire" class="fire" aria-label="Atirar">TIRO</button>
+    </div>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

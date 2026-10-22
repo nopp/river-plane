@@ -213,6 +213,35 @@
   let wasFire = false;
   let sirenFlip = false;
   let bridgeFlash = 0;
+  let padUpHeld = false;
+  let padDownHeld = false;
+  let touchUpPulse = false;
+  let touchDownPulse = false;
+
+  const PILOT_COLOR = ["#E8E230", "#5EE7F5", "#F2A24A"];
+  const PILOT_NAME = ["Amarelo", "Azul", "Laranja"];
+  const mp = {
+    phase: "off",
+    role: "",
+    code: "",
+    password: "",
+    me: "",
+    hostId: "",
+    room: null,
+    joinRoom: null,
+    inputAction: null,
+    stateAction: null,
+    startAction: null,
+    rosterAction: null,
+    pilots: [],
+    self: null,
+    accepted: new Set(),
+    pending: new Set(),
+    auth: null,
+    authTick: 0,
+    hadState: false,
+    waitToken: null,
+  };
 
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -356,6 +385,31 @@
   sprites.shipLeft = flipCanvas(sprites.ship);
   sprites.heliALeft = flipCanvas(sprites.heliA);
   sprites.heliBLeft = flipCanvas(sprites.heliB);
+  sprites.jetAlt = [sprites.jet, tintJet("#5EE7F5"), tintJet("#F2A24A")];
+
+  function tintJet(hex) {
+    const src = sprites.jet;
+    const c = document.createElement("canvas");
+    c.width = src.width;
+    c.height = src.height;
+    const g = c.getContext("2d");
+    g.drawImage(src, 0, 0);
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    const r = parseInt(hex.slice(1, 3), 16);
+    const gg = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] === 0) continue;
+      if (d[i] > 180 && d[i + 1] > 150) {
+        d[i] = r;
+        d[i + 1] = gg;
+        d[i + 2] = b;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
 
   function spriteFor(type) {
     if (type === "heli") return tick % 16 < 8 ? sprites.heliA : sprites.heliB;
@@ -661,8 +715,24 @@
   }
 
   function updateObjects() {
-    const y0 = playerWorldY - 48;
-    const y1 = playerWorldY + 210;
+    let yMin = playerWorldY;
+    let yMax = playerWorldY;
+    if (mp.phase === "play" && mp.role === "host") {
+      let any = false;
+      for (const p of mp.pilots) {
+        if (p.mode === "over") continue;
+        if (!any) {
+          yMin = p.worldY;
+          yMax = p.worldY;
+          any = true;
+        } else {
+          if (p.worldY < yMin) yMin = p.worldY;
+          if (p.worldY > yMax) yMax = p.worldY;
+        }
+      }
+    }
+    const y0 = yMin - 48;
+    const y1 = yMax + 210;
     const s0 = Math.max(0, Math.floor(y0 / SECTION_H));
     const s1 = Math.floor(y1 / SECTION_H);
     for (let s = s0; s <= s1; s++) {
@@ -672,7 +742,7 @@
         if (!obj || obj.dead) continue;
         if (obj.worldY < y0 || obj.worldY > y1) continue;
         if (obj.type === "house" || obj.type === "tree" || obj.type === "fuel") continue;
-        if (!obj.moving && playerWorldY > obj.moveAt) obj.moving = true;
+        if (!obj.moving && yMax > obj.moveAt) obj.moving = true;
         if (!obj.moving && obj.type !== "ejet") continue;
         if (obj.type === "ejet") {
           obj.x += obj.vx;
@@ -700,10 +770,14 @@
   }
 
   function eachNear(cb) {
-    const y0 = playerWorldY - 30;
-    const y1 = playerWorldY + PLAY_H;
-    const s0 = Math.max(0, Math.floor((playerWorldY - 20) / SECTION_H));
-    const s1 = Math.floor((playerWorldY + 180) / SECTION_H);
+    eachNearY(playerWorldY, cb);
+  }
+
+  function eachNearY(worldY, cb) {
+    const y0 = worldY - 30;
+    const y1 = worldY + PLAY_H;
+    const s0 = Math.max(0, Math.floor((worldY - 20) / SECTION_H));
+    const s1 = Math.floor((worldY + 180) / SECTION_H);
     for (let s = s0; s <= s1; s++) {
       const sec = getSection(s);
       for (let i = 0; i < sec.blocks.length; i++) {
@@ -854,6 +928,395 @@
     }
   }
 
+  function makePilot(id, color) {
+    return {
+      id,
+      color,
+      x: 80,
+      worldY: 40,
+      speed: 1,
+      fuel: 1,
+      lives: 3,
+      score: 0,
+      checkpoint: 0,
+      missile: null,
+      mode: "lobby",
+      deathT: 0,
+      guided: false,
+      input: { left: false, right: false, up: false, down: false, fire: false },
+      prevUp: false,
+      prevDown: false,
+      refuel: false,
+      synced: false,
+    };
+  }
+
+  function readInput() {
+    return {
+      left: down.has("ArrowLeft") || down.has("KeyA") || down.has("PadLeft") || touch.left,
+      right: down.has("ArrowRight") || down.has("KeyD") || down.has("PadRight") || touch.right,
+      up: down.has("ArrowUp") || down.has("KeyW") || padUpHeld || touchUpPulse,
+      down: down.has("ArrowDown") || down.has("KeyS") || padDownHeld || touchDownPulse,
+      fire: down.has("Space") || down.has("KeyZ") || down.has("KeyX") || touch.fire || padHeld,
+    };
+  }
+
+  function scorePilot(p, n) {
+    const before = Math.floor(p.score / 10000);
+    p.score += n;
+    const after = Math.floor(p.score / 10000);
+    if (after > before && p.lives < 9) {
+      p.lives = Math.min(9, p.lives + (after - before));
+      if (p === mp.self) sfx.extra();
+    }
+  }
+
+  function killPilot(p, reasonObject) {
+    if (p.mode !== "playing") return;
+    if (reasonObject && POINTS[reasonObject.type]) scorePilot(p, POINTS[reasonObject.type]);
+    p.mode = "dying";
+    p.deathT = 0;
+    p.missile = null;
+    explosions.push({ x: p.x, worldY: p.worldY + 4, t: 0, big: true });
+    if (p === mp.self) sfx.explode();
+  }
+
+  function finishPilotDeath(p) {
+    p.lives -= 1;
+    p.missile = null;
+    if (p.lives <= 0) {
+      p.mode = "over";
+      if (p === mp.self && p.score > best) {
+        best = p.score;
+        localStorage.setItem("riverraid-best", String(best));
+      }
+      return;
+    }
+    p.worldY = p.checkpoint * SECTION_H + 36;
+    p.fuel = 1;
+    p.speed = 1;
+    const g = geometryAt(p.worldY + 4);
+    p.x = channelCenter(g);
+    p.mode = "playing";
+    p.deathT = 0;
+  }
+
+  function placePilot(p, index, n) {
+    p.worldY = 40;
+    p.fuel = 1;
+    p.lives = 3;
+    p.score = 0;
+    p.speed = 1;
+    p.checkpoint = 0;
+    p.missile = null;
+    p.mode = "playing";
+    p.deathT = 0;
+    p.prevUp = false;
+    p.prevDown = false;
+    const g = geometryAt(p.worldY + 4);
+    const mid = (n - 1) / 2;
+    p.x = clamp(channelCenter(g) + (index - mid) * 16, 8, W - 8);
+  }
+
+  function pilotHitsBank(p) {
+    const samples = [
+      [p.x, p.worldY + 1],
+      [p.x - 4, p.worldY + 6],
+      [p.x + 4, p.worldY + 6],
+      [p.x, p.worldY + 12],
+    ];
+    for (const [x, y] of samples) {
+      const g = geometryAt(y);
+      const left = g.cx - g.half;
+      const right = g.cx + g.half;
+      if (x < left || x > right) return true;
+      if (g.island > 1 && x > g.cx - g.island && x < g.cx + g.island) return true;
+    }
+    return false;
+  }
+
+  function stepPilotMove(p) {
+    if (p.mode === "dying") {
+      p.deathT++;
+      if (p.deathT > 56) finishPilotDeath(p);
+      return;
+    }
+    if (p.mode !== "playing") return;
+    const input = p.input || {};
+    if (input.up && !p.prevUp) p.speed = clamp(p.speed + 1, 0, 2);
+    if (input.down && !p.prevDown) p.speed = clamp(p.speed - 1, 0, 2);
+    p.prevUp = !!input.up;
+    p.prevDown = !!input.down;
+    if (input.left) p.x -= 1.55;
+    if (input.right) p.x += 1.55;
+    p.x = clamp(p.x, 4, W - 4);
+    p.worldY += SPEEDS[p.speed];
+    p.fuel = Math.max(0, p.fuel - 1 / FUEL_FRAMES);
+    if (p.fuel <= 0) killPilot(p, null);
+  }
+
+  function stepPilotFight(p) {
+    if (p.mode !== "playing") return;
+    const input = p.input || {};
+    if (p.missile) {
+      p.missile.worldY += SPEEDS[p.speed] + 3.1;
+      if (p.guided) p.missile.x = p.x;
+      if (p.missile.worldY > p.worldY + playerScreenTop() + 8) p.missile = null;
+    }
+    if (p.missile) {
+      const shot = p.missile;
+      eachNearY(p.worldY, (item) => {
+        if (!p.missile) return;
+        if (item.kind === "bridge") {
+          if (destroyedBridges.has(item.section)) return;
+          const g = geometryAt(item.worldY + 6);
+          const left = g.cx - g.half;
+          if (rects(shot.x - 1, shot.worldY, 2, 5, left, item.worldY, g.half * 2, 12)) {
+            destroyedBridges.add(item.section);
+            for (const other of mp.pilots) other.checkpoint = Math.max(other.checkpoint, item.section + 1);
+            scorePilot(p, 500);
+            explosions.push({ x: shot.x, worldY: item.worldY + 4, t: 0, big: true });
+            if (p === mp.self) sfx.bridge();
+            bridgeFlash = 8;
+            p.missile = null;
+          }
+          return;
+        }
+        const obj = item.obj;
+        if (obj.type === "house" || obj.type === "tree") return;
+        const r = objectRect(obj);
+        if (rects(shot.x - 1, shot.worldY, 2, 5, r.x, r.y, r.w, r.h)) {
+          obj.dead = true;
+          scorePilot(p, POINTS[obj.type] || 0);
+          explosions.push({ x: obj.x, worldY: obj.worldY + r.h / 2, t: 0, big: obj.type === "fuel" });
+          if (p === mp.self) sfx.explodeSmall();
+          p.missile = null;
+        }
+      });
+    }
+    if (p.mode !== "playing") return;
+    const prect = { x: p.x - 4, y: p.worldY + 1, w: 8, h: 12 };
+    let refueling = false;
+    eachNearY(p.worldY, (item) => {
+      if (p.mode !== "playing") return;
+      if (item.kind === "bridge") {
+        if (destroyedBridges.has(item.section)) return;
+        const g = geometryAt(item.worldY + 6);
+        if (rects(prect.x, prect.y, prect.w, prect.h, g.cx - g.half, item.worldY, g.half * 2, 12)) killPilot(p, null);
+        return;
+      }
+      const obj = item.obj;
+      const r = objectRect(obj);
+      if (!rects(prect.x, prect.y, prect.w, prect.h, r.x, r.y, r.w, r.h)) return;
+      if (obj.type === "fuel") {
+        refueling = true;
+        p.fuel = Math.min(1, p.fuel + 0.02);
+      } else if (obj.type === "house" || obj.type === "tree") {
+        return;
+      } else {
+        obj.dead = true;
+        killPilot(p, obj);
+      }
+    });
+    p.refuel = refueling;
+    if (p.mode !== "playing") return;
+    if (refueling && p === mp.self && tick % 8 === 0) sfx.refuel(p.fuel >= 1);
+    if (pilotHitsBank(p)) killPilot(p, null);
+    if (p.mode === "playing" && input.fire && !p.missile) {
+      const top = p.worldY + 2;
+      p.missile = { x: p.x, worldY: top };
+      if (p === mp.self) sfx.shot();
+    }
+  }
+
+  function syncView() {
+    const self = mp.self;
+    if (!self) return;
+    fuel = self.fuel;
+    lives = self.lives;
+    score = self.score;
+    speed = self.speed;
+    checkpoint = self.checkpoint;
+    missile = self.missile;
+    if (self.mode !== "over") {
+      player.x = self.x;
+      playerWorldY = self.worldY;
+      return;
+    }
+    let lead = null;
+    for (const p of mp.pilots) {
+      if (p.mode === "over") continue;
+      if (!lead || p.worldY > lead.worldY) lead = p;
+    }
+    if (lead) {
+      player.x = lead.x;
+      playerWorldY = lead.worldY;
+    }
+  }
+
+  function maybeSiren() {
+    if (mp.phase !== "play" || !mp.self || mp.self.mode !== "playing") return;
+    if (fuel < 0.25 && tick % (fuel < 0.1 ? 10 : 16) === 0) {
+      sirenFlip = !sirenFlip;
+      sfx.siren(sirenFlip, fuel < 0.1);
+    }
+  }
+
+  function packState() {
+    const r1 = (n) => Math.round(n * 10) / 10;
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (const p of mp.pilots) {
+      if (p.mode === "over") continue;
+      if (p.worldY < yMin) yMin = p.worldY;
+      if (p.worldY > yMax) yMax = p.worldY;
+    }
+    if (yMin === Infinity) {
+      yMin = playerWorldY;
+      yMax = playerWorldY;
+    }
+    const objects = [];
+    const s0 = Math.max(0, Math.floor((yMin - 40) / SECTION_H));
+    const s1 = Math.floor((yMax + 200) / SECTION_H);
+    for (let s = s0; s <= s1; s++) {
+      const sec = getSection(s);
+      for (let i = 0; i < sec.blocks.length; i++) {
+        const obj = sec.blocks[i].object;
+        if (!obj || obj.type === "house" || obj.type === "tree") continue;
+        if (obj.worldY < yMin - 40 || obj.worldY > yMax + 220) continue;
+        objects.push({
+          id: s * 32 + i,
+          x: r1(obj.x),
+          vx: Math.round(obj.vx * 100) / 100,
+          d: obj.dead ? 1 : 0,
+        });
+      }
+    }
+    return {
+      br: Array.from(destroyedBridges),
+      fl: bridgeFlash,
+      e: explosions.slice(-8).map((ex) => ({
+        x: Math.round(ex.x),
+        y: Math.round(ex.worldY),
+        t: ex.t,
+        b: ex.big ? 1 : 0,
+      })),
+      p: mp.pilots.map((p) => ({
+        id: p.id,
+        c: p.color,
+        x: r1(p.x),
+        y: r1(p.worldY),
+        sp: p.speed,
+        fu: Math.round(p.fuel * 1000) / 1000,
+        lv: p.lives,
+        sc: Math.floor(p.score),
+        md: p.mode,
+        rf: p.refuel ? 1 : 0,
+        mx: p.missile ? r1(p.missile.x) : null,
+        my: p.missile ? r1(p.missile.worldY) : null,
+      })),
+      o: objects,
+    };
+  }
+
+  function applyState(data) {
+    if (!data) return;
+    const known = mp.hadState;
+    const grew = known && (data.br || []).length > destroyedBridges.size;
+    destroyedBridges.clear();
+    for (const section of data.br || []) destroyedBridges.add(section);
+    bridgeFlash = data.fl || 0;
+    explosions = (data.e || []).map((ex) => ({ x: ex.x, worldY: ex.y, t: ex.t, big: !!ex.b }));
+    for (const raw of data.o || []) {
+      const s = Math.floor(raw.id / 32);
+      const i = raw.id % 32;
+      const sec = getSection(s);
+      const obj = sec.blocks[i] && sec.blocks[i].object;
+      if (!obj) continue;
+      obj.x = raw.x;
+      obj.vx = raw.vx;
+      obj.dead = !!raw.d;
+      obj.moving = true;
+    }
+    const prev = mp.self;
+    const prevMode = prev ? prev.mode : "";
+    const prevLives = prev ? prev.lives : 0;
+    const prevScore = prev ? prev.score : 0;
+    const prevMissile = !!(prev && prev.missile);
+    mp.pilots = (data.p || []).map((raw) => {
+      let p = mp.pilots.find((item) => item.id === raw.id);
+      if (!p) p = makePilot(raw.id, raw.c || 0);
+      p.color = raw.c || 0;
+      p.speed = raw.sp;
+      p.fuel = raw.fu;
+      p.lives = raw.lv;
+      p.score = raw.sc;
+      p.mode = raw.md;
+      p.refuel = !!raw.rf;
+      p.authX = raw.x;
+      p.authY = raw.y;
+      p.missile = raw.mx == null ? null : { x: raw.mx, worldY: raw.my };
+      if (!p.synced) {
+        p.x = raw.x;
+        p.worldY = raw.y;
+        p.synced = true;
+      }
+      return p;
+    });
+    mp.auth = data;
+    mp.authTick = tick;
+    mp.hadState = true;
+    mp.self = mp.pilots.find((p) => p.id === mp.me) || null;
+    syncView();
+    if (grew) sfx.bridge();
+    if (!known || !mp.self) return;
+    const died = prevMode === "playing" && mp.self.mode === "dying";
+    if (died) sfx.explode();
+    if (mp.self.lives > prevLives) sfx.extra();
+    if (!died && mp.self.mode === "playing" && mp.self.missile && !prevMissile) sfx.shot();
+    const gained = mp.self.score - prevScore;
+    if (!died && gained > 0 && !(grew && gained === 500)) sfx.explodeSmall();
+  }
+
+  function updateMatch() {
+    if (!mp.self) return;
+    mp.self.input = readInput();
+    mp.self.guided = guided;
+    for (const p of mp.pilots) stepPilotMove(p);
+    updateObjects();
+    for (const p of mp.pilots) stepPilotFight(p);
+    syncView();
+    maybeSiren();
+    if (tick % 3 === 0) sendSafe(mp.stateAction, packState());
+  }
+
+  function updateGuest() {
+    const input = readInput();
+    sendSafe(mp.inputAction, {
+      left: input.left,
+      right: input.right,
+      up: input.up,
+      down: input.down,
+      fire: input.fire,
+      g: guided ? 1 : 0,
+    }, mp.hostId ? { target: mp.hostId } : null);
+    const dt = Math.min(8, Math.max(0, tick - mp.authTick));
+    for (const p of mp.pilots) {
+      if (!p.synced || p.authY == null) continue;
+      const targetY = p.authY + (p.mode === "playing" ? SPEEDS[p.speed] * dt : 0);
+      if (Math.abs(targetY - p.worldY) > 48 || Math.abs(p.authX - p.x) > 24) {
+        p.x = p.authX;
+        p.worldY = targetY;
+      } else {
+        p.x += (p.authX - p.x) * 0.5;
+        p.worldY += (targetY - p.worldY) * 0.5;
+      }
+    }
+    syncView();
+    if (mp.self && mp.self.refuel && mp.self.mode === "playing" && tick % 8 === 0) sfx.refuel(fuel >= 1);
+    maybeSiren();
+  }
+
   function update() {
     tick++;
     if (toastT > 0) toastT--;
@@ -870,9 +1333,15 @@
     const fireEdge = startHeld && !wasFire;
     wasFire = startHeld;
 
-    if (mode === "title" || mode === "over") {
+    if (mp.phase === "play" && mp.role === "host") {
+      updateMatch();
+    } else if (mp.phase === "play" && mp.role === "guest") {
+      updateGuest();
+    } else if ((mode === "title" || mode === "over") && mp.phase !== "lobby") {
       if (fireEdge || edge.enter) startGame();
       else updateAttract();
+    } else if (mp.phase === "lobby") {
+      updateAttract();
     } else if (mode === "paused") {
       /* frozen */
     } else if (mode === "dying") {
@@ -884,9 +1353,12 @@
     const turnLeft = down.has("ArrowLeft") || down.has("KeyA") || down.has("PadLeft") || touch.left;
     const turnRight = down.has("ArrowRight") || down.has("KeyD") || down.has("PadRight") || touch.right;
     const turn = turnLeft === turnRight ? 0 : turnLeft ? -1 : 1;
-    sfx.engine(mode === "playing", speed, turn);
+    const flying = mp.phase === "play" ? !!(mp.self && mp.self.mode === "playing") : mode === "playing";
+    sfx.engine(flying, speed, turn);
     edge.enter = false;
     padFireEdge = false;
+    touchUpPulse = false;
+    touchDownPulse = false;
   }
 
   let padHeld = false;
@@ -907,6 +1379,8 @@
       if (ay > 0.55) downAxis = true;
       for (const b of p.buttons) if (b.pressed) fire = true;
     }
+    padUpHeld = up;
+    padDownHeld = downAxis;
     if (left) down.add("PadLeft");
     else down.delete("PadLeft");
     if (right) down.add("PadRight");
@@ -922,6 +1396,7 @@
   const edge = { enter: false, padUp: false, padDown: false };
 
   function changeSpeed(dir) {
+    if (mp.phase === "play") return;
     if (mode !== "playing") return;
     speed = clamp(speed + dir, 0, 2);
   }
@@ -1062,7 +1537,7 @@
     }
     for (const obj of jets) blit(spriteFor(obj.type), obj.x, obj.worldY);
 
-    if (missile) {
+    if (mp.phase !== "play" && missile) {
       const sy = Math.round(worldToScreen(missile.worldY));
       ctx.fillStyle = COL.needle;
       ctx.fillRect(Math.round(missile.x) - 0, sy, 1, 5);
@@ -1079,7 +1554,16 @@
       ctx.fillRect(Math.round(ex.x) - 1, sy - 1, 3, 3);
     }
 
-    if (mode !== "dying" && mode !== "over") {
+    if (mp.phase === "play") {
+      for (const p of mp.pilots) {
+        if (p.mode === "dying" || p.mode === "over") continue;
+        blit(sprites.jetAlt[p.color] || sprites.jet, p.x, p.worldY);
+        if (!p.missile) continue;
+        const sy = Math.round(worldToScreen(p.missile.worldY));
+        ctx.fillStyle = COL.needle;
+        ctx.fillRect(Math.round(p.missile.x), sy, 1, 5);
+      }
+    } else if (mode !== "dying" && mode !== "over") {
       blit(sprites.jet, player.x, playerWorldY);
     }
     ctx.restore();
@@ -1130,8 +1614,11 @@
     }
     if (mode === "title") {
       drawCentered("RIVER PLANE", 8, 2, COL.yellow, true);
-      if (Math.floor(tick / 30) % 2 === 0) drawCentered("PRESS FIRE", 30, 1, COL.white, true);
+      if (mp.phase === "lobby") drawCentered("NA SALA", 30, 1, COL.white, true);
+      else if (Math.floor(tick / 30) % 2 === 0) drawCentered("PRESS FIRE", 30, 1, COL.white, true);
       drawCentered(guided ? "TIRO GUIADO" : "TIRO RETO", 42, 1, COL.white, true);
+    } else if (mp.phase === "play" && mp.self && mp.self.mode === "over") {
+      drawCentered("VOCE CAIU", 58, 1, COL.yellow, true);
     } else if (mode === "paused") {
       drawCentered("PAUSA", 70, 2, COL.yellow, true);
     } else if (mode === "over") {
@@ -1295,12 +1782,15 @@
     sfx.unlock();
     if (e.code === "ArrowUp" || e.code === "KeyW") changeSpeed(1);
     if (e.code === "ArrowDown" || e.code === "KeyS") changeSpeed(-1);
-    if (e.code === "Enter" && !e.repeat) {
-      edge.enter = true;
-      if (mode === "paused") mode = "playing";
+    if (e.code === "Enter" && !e.repeat && !(e.target && e.target.closest && e.target.closest("#room"))) {
+      if (mp.phase === "off") {
+        edge.enter = true;
+        if (mode === "paused") mode = "playing";
+      }
     }
     if (e.code === "KeyP" && !e.repeat) {
-      if (mode === "playing") mode = "paused";
+      if (mp.phase === "play") showToast("SEM PAUSA");
+      else if (mode === "playing") mode = "paused";
       else if (mode === "paused") mode = "playing";
     }
     if (e.code === "KeyM" && !e.repeat) {
@@ -1321,7 +1811,7 @@
 
   canvas.addEventListener("pointerdown", (e) => {
     sfx.unlock();
-    if (mode === "title" || mode === "over") {
+    if ((mode === "title" || mode === "over") && mp.phase === "off") {
       edge.enter = true;
       return;
     }
@@ -1349,10 +1839,14 @@
     const press = (ev) => {
       ev.preventDefault();
       sfx.unlock();
-      if (hold === "up") changeSpeed(1);
-      else if (hold === "down") changeSpeed(-1);
-      else touch[hold] = true;
-      if ((mode === "title" || mode === "over") && hold === "fire") edge.enter = true;
+      if (hold === "up") {
+        if (mp.phase === "play") touchUpPulse = true;
+        else changeSpeed(1);
+      } else if (hold === "down") {
+        if (mp.phase === "play") touchDownPulse = true;
+        else changeSpeed(-1);
+      } else touch[hold] = true;
+      if ((mode === "title" || mode === "over") && mp.phase === "off" && hold === "fire") edge.enter = true;
     };
     const release = () => {
       if (hold === "left" || hold === "right" || hold === "fire") touch[hold] = false;
@@ -1362,6 +1856,336 @@
     button.addEventListener("pointerleave", release);
     button.addEventListener("pointercancel", release);
   }
+
+  let roomForm = "setup";
+  let roomBusy = false;
+
+  function roomError(text) {
+    const el = document.getElementById("room-msg");
+    el.hidden = !text;
+    el.textContent = text || "";
+  }
+
+  function rosterRows() {
+    if (mp.pilots.length) {
+      return mp.pilots.map((p) => ({ id: p.id, color: p.color }));
+    }
+    const ids = mp.rosterIds || [];
+    const colors = mp.rosterColors || [];
+    return ids.map((id, i) => ({ id, color: colors[i] ?? i }));
+  }
+
+  function showPanels() {
+    const inRoom = mp.phase === "lobby" || mp.phase === "play";
+    document.getElementById("room-setup").hidden = inRoom || roomForm !== "setup";
+    document.getElementById("room-create").hidden = inRoom || roomForm !== "create";
+    document.getElementById("room-join").hidden = inRoom || roomForm !== "join";
+    document.getElementById("room-lobby").hidden = !inRoom;
+    if (!inRoom) return;
+    document.getElementById("room-code-show").textContent = mp.code;
+    const rows = rosterRows();
+    const list = document.getElementById("room-list");
+    list.replaceChildren();
+    for (const row of rows) {
+      const li = document.createElement("li");
+      const name = PILOT_NAME[row.color] || PILOT_NAME[0];
+      li.textContent = name + (row.id === mp.me ? " (você)" : "");
+      list.appendChild(li);
+    }
+    const me = rows.find((row) => row.id === mp.me);
+    const you = document.getElementById("room-you");
+    you.textContent = me ? "Você é o avião " + (PILOT_NAME[me.color] || PILOT_NAME[0]).toLowerCase() + "." : "Conectando…";
+    if (mp.phase === "play") you.textContent += " Em jogo.";
+    const start = document.getElementById("room-start");
+    start.hidden = mp.role !== "host" || mp.phase === "play";
+    start.disabled = mp.pilots.length < 2;
+  }
+
+  function sendSafe(action, data, options) {
+    if (!action) return;
+    try {
+      const pending = options ? action.send(data, options) : action.send(data);
+      if (pending && typeof pending.then === "function") pending.catch(() => {});
+    } catch (err) {
+      /* no peer on the channel yet */
+    }
+  }
+
+  function sendRoster() {
+    if (mp.role !== "host" || !mp.rosterAction) return;
+    sendSafe(mp.rosterAction, {
+      ids: mp.pilots.map((p) => p.id),
+      colors: mp.pilots.map((p) => p.color),
+      phase: mp.phase,
+    });
+  }
+
+  function resetTitle() {
+    mode = "title";
+    score = 0;
+    lives = 3;
+    fuel = 1;
+    speed = 1;
+    checkpoint = 0;
+    missile = null;
+    explosions = [];
+    deathT = 0;
+    sectionCache.clear();
+    destroyedBridges.clear();
+    playerWorldY = 48;
+    player.x = 80;
+  }
+
+  function beginMatchLocal() {
+    if (mp.phase === "play") return;
+    if (!mp.hadState) {
+      sectionCache.clear();
+      destroyedBridges.clear();
+      explosions = [];
+      missile = null;
+    }
+    mode = "playing";
+    mp.phase = "play";
+    showPanels();
+  }
+
+  function beginMatchHost() {
+    if (mp.role !== "host" || mp.pilots.length < 2) return;
+    sectionCache.clear();
+    destroyedBridges.clear();
+    explosions = [];
+    missile = null;
+    const n = mp.pilots.length;
+    mp.pilots.forEach((p, i) => placePilot(p, i, n));
+    mp.phase = "play";
+    mode = "playing";
+    syncView();
+    sendSafe(mp.startAction, { go: 1 });
+    sendSafe(mp.stateAction, packState());
+    sendRoster();
+    showPanels();
+  }
+
+  function leaveRoom() {
+    const wasMatch = mp.phase === "play";
+    const room = mp.room;
+    mp.waitToken = null;
+    mp.phase = "off";
+    mp.role = "";
+    mp.room = null;
+    mp.pilots = [];
+    mp.self = null;
+    mp.hostId = "";
+    mp.auth = null;
+    mp.rosterIds = [];
+    mp.rosterColors = [];
+    mp.accepted = new Set();
+    mp.pending = new Set();
+    mp.inputAction = null;
+    mp.stateAction = null;
+    mp.startAction = null;
+    mp.rosterAction = null;
+    if (room) {
+      try { room.leave(); } catch (err) { /* already gone */ }
+    }
+    if (wasMatch || mode !== "title") resetTitle();
+    roomForm = "setup";
+    roomError("");
+    showPanels();
+  }
+
+  function roomCode() {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 4; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return code;
+  }
+
+  async function loadNet() {
+    if (mp.joinRoom) return;
+    const mod = await import("https://esm.run/@trystero-p2p/mqtt@0.26.0");
+    mp.joinRoom = mod.joinRoom;
+    mp.me = mod.selfId;
+  }
+
+  function freeColor() {
+    const used = new Set(mp.pilots.map((p) => p.color));
+    for (let c = 0; c < PILOT_NAME.length; c++) if (!used.has(c)) return c;
+    return 0;
+  }
+
+  async function openRoom(role, code, password) {
+    if (roomBusy || mp.phase !== "off") return;
+    roomBusy = true;
+    roomError("");
+    try {
+    await loadNet();
+    resetTitle();
+    mp.role = role;
+    mp.code = code;
+    mp.password = password;
+    mp.phase = "lobby";
+    mp.hostId = role === "host" ? mp.me : "";
+    mp.accepted = new Set();
+    mp.pending = new Set();
+    mp.hadState = false;
+    mp.rosterIds = [];
+    mp.rosterColors = [];
+    mp.pilots = role === "host" ? [makePilot(mp.me, 0)] : [];
+    mp.self = role === "host" ? mp.pilots[0] : null;
+    mp.room = mp.joinRoom({ appId: "river-plane", password }, "rp-" + code, {
+      onJoinError() {
+        if (mp.role !== "guest" || mp.phase === "off") return;
+        const rows = rosterRows();
+        if (mp.hostId && rows.some((row) => row.id === mp.me)) return;
+        leaveRoom();
+        roomError("Não entrou. Senha errada, sala cheia ou sem ligação direta.");
+      },
+      onPeerHandshake: async (peerId, send, receive, isInitiator) => {
+        if (mp.role === "host" && mp.accepted.size + mp.pending.size >= 2) throw new Error("cheia");
+        if (mp.role === "host") mp.pending.add(peerId);
+        try {
+          const mine = { role: mp.role };
+          let theirs;
+          if (isInitiator) {
+            await send(mine);
+            theirs = (await receive()).data;
+          } else {
+            theirs = (await receive()).data;
+            await send(mine);
+          }
+          if (theirs && theirs.role === "host") mp.hostId = peerId;
+        } catch (err) {
+          mp.pending.delete(peerId);
+          throw err;
+        }
+      },
+    });
+    mp.inputAction = mp.room.makeAction("in");
+    mp.stateAction = mp.room.makeAction("st");
+    mp.startAction = mp.room.makeAction("go");
+    mp.rosterAction = mp.room.makeAction("ls");
+    mp.inputAction.onMessage = (data, meta) => {
+      if (mp.role !== "host" || !data) return;
+      const p = mp.pilots.find((item) => item.id === meta.peerId);
+      if (!p) return;
+      p.input = {
+        left: !!data.left,
+        right: !!data.right,
+        up: !!data.up,
+        down: !!data.down,
+        fire: !!data.fire,
+      };
+      p.guided = !!data.g;
+    };
+    mp.stateAction.onMessage = (data) => {
+      if (mp.role === "guest") applyState(data);
+    };
+    mp.startAction.onMessage = () => {
+      if (mp.role === "guest") beginMatchLocal();
+    };
+    mp.rosterAction.onMessage = (data) => {
+      if (mp.role !== "guest" || !data) return;
+      mp.rosterIds = data.ids || [];
+      mp.rosterColors = data.colors || [];
+      if (data.phase === "play") beginMatchLocal();
+      showPanels();
+    };
+    mp.room.onPeerJoin = (peerId) => {
+      mp.pending.delete(peerId);
+      if (mp.role !== "host") {
+        showPanels();
+        return;
+      }
+      mp.accepted.add(peerId);
+      if (!mp.pilots.some((p) => p.id === peerId) && mp.pilots.length < 3) {
+        const p = makePilot(peerId, freeColor());
+        if (mp.phase === "play") {
+          p.checkpoint = mp.self ? mp.self.checkpoint : 0;
+          p.worldY = mp.self ? Math.max(40, mp.self.worldY - 48) : 40;
+          p.fuel = 1;
+          p.lives = 3;
+          p.score = 0;
+          p.speed = 1;
+          p.mode = "playing";
+          p.x = channelCenter(geometryAt(p.worldY + 4));
+        }
+        mp.pilots.push(p);
+      }
+      sendRoster();
+      showPanels();
+    };
+    mp.room.onPeerLeave = (peerId) => {
+      mp.pending.delete(peerId);
+      mp.accepted.delete(peerId);
+      mp.pilots = mp.pilots.filter((p) => p.id !== peerId);
+      if (mp.role === "guest" && peerId === mp.hostId && mp.phase !== "off") {
+        showToast("SALA CAIU");
+        leaveRoom();
+        return;
+      }
+      if (mp.role === "host") sendRoster();
+      showPanels();
+    };
+    showPanels();
+    if (mp.role === "host") sendRoster();
+    if (role === "guest") {
+      const token = {};
+      mp.waitToken = token;
+      setTimeout(() => {
+        if (mp.waitToken !== token || mp.phase === "off") return;
+        if (rosterRows().some((row) => row.id === mp.me)) return;
+        leaveRoom();
+        roomError("Não entrou. Senha errada, sala cheia ou sem ligação direta.");
+      }, 12000);
+    }
+    } finally {
+      roomBusy = false;
+    }
+  }
+
+  document.getElementById("room-open").addEventListener("click", () => {
+    roomForm = "create";
+    roomError("");
+    showPanels();
+  });
+  document.getElementById("room-join-show").addEventListener("click", () => {
+    roomForm = "join";
+    roomError("");
+    showPanels();
+  });
+  for (const button of document.querySelectorAll("[data-room-cancel]")) {
+    button.addEventListener("click", () => {
+      roomForm = "setup";
+      roomError("");
+      showPanels();
+    });
+  }
+  document.getElementById("room-create").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const password = document.getElementById("room-pass").value;
+    if (!password) return;
+    openRoom("host", roomCode(), password).catch(() => {
+      leaveRoom();
+      roomError("Sem rede para abrir a sala.");
+    });
+  });
+  document.getElementById("room-join").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const code = document.getElementById("room-code").value.trim().toUpperCase();
+    const password = document.getElementById("room-pass-join").value;
+    if (!/^[A-Z0-9]{4}$/.test(code) || !password) {
+      roomError("Código de 4 letras e a senha.");
+      return;
+    }
+    openRoom("guest", code, password).catch(() => {
+      leaveRoom();
+      roomError("Sem rede para entrar na sala.");
+    });
+  });
+  document.getElementById("room-start").addEventListener("click", beginMatchHost);
+  document.getElementById("room-leave").addEventListener("click", leaveRoom);
+  showPanels();
 
   let last = performance.now();
   let acc = 0;

@@ -16,6 +16,32 @@
       <p><kbd>Enter</kbd> começa · <kbd>P</kbd> pausa · <kbd>M</kbd> som · <kbd>G</kbd> tiro reto ou guiado</p>
       <p class="scores">Navio 30 · Helicóptero 60 · Depósito 80 · Jato 100 · Ponte 500 · vida extra a cada 10.000</p>
     </section>
+    <section class="room" id="room">
+      <p class="room-lead">Sala com senha, até 3 aviões. Cada um voa na própria velocidade.</p>
+      <p id="room-msg" class="room-msg" hidden></p>
+      <div id="room-setup">
+        <button type="button" id="room-open">Criar sala</button>
+        <button type="button" id="room-join-show">Entrar</button>
+      </div>
+      <form id="room-create" hidden>
+        <label>Senha <input id="room-pass" type="password" maxlength="24" autocomplete="off" required></label>
+        <button type="submit">Abrir</button>
+        <button type="button" data-room-cancel>Cancelar</button>
+      </form>
+      <form id="room-join" hidden>
+        <label>Código <input id="room-code" maxlength="4" autocomplete="off" required></label>
+        <label>Senha <input id="room-pass-join" type="password" maxlength="24" autocomplete="off" required></label>
+        <button type="submit">Entrar</button>
+        <button type="button" data-room-cancel>Cancelar</button>
+      </form>
+      <div id="room-lobby" hidden>
+        <p>Código <strong id="room-code-show"></strong></p>
+        <p id="room-you"></p>
+        <ul id="room-list"></ul>
+        <button type="button" id="room-start" hidden>Começar</button>
+        <button type="button" id="room-leave">Sair</button>
+      </div>
+    </section>
     <div class="pad" aria-label="Controles de toque">
       <button type="button" data-hold="left" aria-label="Esquerda">◀</button>
       <button type="button" data-hold="down" aria-label="Frear">▼</button>

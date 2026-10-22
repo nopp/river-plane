@@ -881,6 +881,10 @@
     } else {
       updatePlay();
     }
+    const turnLeft = down.has("ArrowLeft") || down.has("KeyA") || down.has("PadLeft") || touch.left;
+    const turnRight = down.has("ArrowRight") || down.has("KeyD") || down.has("PadRight") || touch.right;
+    const turn = turnLeft === turnRight ? 0 : turnLeft ? -1 : 1;
+    sfx.engine(mode === "playing", speed, turn);
     edge.enter = false;
     padFireEdge = false;
   }
@@ -1187,8 +1191,91 @@
       g.connect(master);
       src.start();
     }
+
+    // Continuous jet buzz, the 2600 engine: a thin square plus a little grit.
+    // Pitch steps with the three speeds. Gain stays under shots and the siren.
+    const ENGINE_HZ = [132, 176, 236];
+    let engine = null;
+    let engineOn = false;
+    let engineBank = 0;
+    let engineOsc = null;
+    let engineHigh = null;
+    let engineNoise = null;
+    function ensureEngine() {
+      if (engine || !actx) return;
+      engine = actx.createGain();
+      engine.gain.value = 0;
+      engine.connect(master);
+
+      engineOsc = actx.createOscillator();
+      engineOsc.type = "square";
+      engineOsc.frequency.value = ENGINE_HZ[1];
+      const body = actx.createGain();
+      body.gain.value = 0.16;
+      engineOsc.connect(body);
+      body.connect(engine);
+
+      engineHigh = actx.createOscillator();
+      engineHigh.type = "square";
+      engineHigh.frequency.value = ENGINE_HZ[1] * 2;
+      const bite = actx.createGain();
+      bite.gain.value = 0.045;
+      engineHigh.connect(bite);
+      bite.connect(engine);
+
+      const len = Math.floor(actx.sampleRate * 0.09);
+      const buf = actx.createBuffer(1, len, actx.sampleRate);
+      const data = buf.getChannelData(0);
+      let lfsr = 0x13;
+      for (let i = 0; i < len; i++) {
+        const bit = ((lfsr >> 0) ^ (lfsr >> 2)) & 1;
+        lfsr = ((lfsr >> 1) | (bit << 4)) & 0x1f;
+        data[i] = lfsr & 1 ? 0.45 : -0.45;
+      }
+      engineNoise = actx.createBufferSource();
+      engineNoise.buffer = buf;
+      engineNoise.loop = true;
+      engineNoise.playbackRate.value = 1;
+      const grit = actx.createGain();
+      grit.gain.value = 0.05;
+      const band = actx.createBiquadFilter();
+      band.type = "bandpass";
+      band.frequency.value = 640;
+      band.Q.value = 0.6;
+      engineNoise.connect(band);
+      band.connect(grit);
+      grit.connect(engine);
+
+      engineOsc.start();
+      engineHigh.start();
+      engineNoise.start();
+    }
+    function engineFly(on, speedIndex, turn) {
+      if (!actx) return;
+      ensureEngine();
+      const now = actx.currentTime;
+      if (on !== engineOn) {
+        engineOn = on;
+        engine.gain.cancelScheduledValues(now);
+        engine.gain.setTargetAtTime(on ? 0.58 : 0, now, on ? 0.05 : 0.03);
+      }
+      if (!on) {
+        engineBank = 0;
+        return;
+      }
+      const stick = turn || 0;
+      engineBank += (stick - engineBank) * 0.12;
+      const mag = Math.abs(engineBank);
+      const base = ENGINE_HZ[speedIndex] || ENGINE_HZ[1];
+      const hz = base * (1 + mag * 0.18) + engineBank * base * 0.05;
+      const flutter = Math.sin(now * (28 + mag * 26)) * (2.2 + speedIndex + mag * 10);
+      engineOsc.frequency.setTargetAtTime(hz + flutter, now, 0.02);
+      engineHigh.frequency.setTargetAtTime((hz + flutter) * 2, now, 0.02);
+      engineNoise.playbackRate.setTargetAtTime((hz / ENGINE_HZ[1]) * (1 + mag * 0.25), now, 0.04);
+    }
     return {
       unlock,
+      engine: engineFly,
       shot() { tone(880, 0.07, "square", 0.18); tone(420, 0.09, "square", 0.12); },
       explode() { noise(0.22); tone(140, 0.18, "sawtooth", 0.2); },
       explodeSmall() { noise(0.12); },

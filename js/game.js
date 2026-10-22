@@ -227,16 +227,25 @@
     password: "",
     me: "",
     hostId: "",
-    room: null,
-    joinRoom: null,
+    topic: "",
+    clients: [],
+    mqtt: null,
+    seq: 0,
+    lastN: new Map(),
+    seen: new Map(),
+    hostSeen: 0,
+    heart: null,
+    beat: 0,
+    inSig: -1,
+    connToken: null,
     inputAction: null,
     stateAction: null,
     startAction: null,
     rosterAction: null,
     pilots: [],
     self: null,
-    accepted: new Set(),
-    pending: new Set(),
+    rosterIds: [],
+    rosterColors: [],
     auth: null,
     authTick: 0,
     hadState: false,
@@ -1287,20 +1296,24 @@
     for (const p of mp.pilots) stepPilotFight(p);
     syncView();
     maybeSiren();
-    if (tick % 3 === 0) sendSafe(mp.stateAction, packState());
+    if (tick % 6 === 0) sendSafe(mp.stateAction, packState());
   }
 
   function updateGuest() {
     const input = readInput();
-    sendSafe(mp.inputAction, {
-      left: input.left,
-      right: input.right,
-      up: input.up,
-      down: input.down,
-      fire: input.fire,
-      g: guided ? 1 : 0,
-    }, mp.hostId ? { target: mp.hostId } : null);
-    const dt = Math.min(8, Math.max(0, tick - mp.authTick));
+    const sig = (input.left ? 1 : 0) | (input.right ? 2 : 0) | (input.up ? 4 : 0) | (input.down ? 8 : 0) | (input.fire ? 16 : 0) | (guided ? 32 : 0);
+    if (sig !== mp.inSig || tick % 6 === 0) {
+      mp.inSig = sig;
+      sendSafe(mp.inputAction, {
+        left: input.left,
+        right: input.right,
+        up: input.up,
+        down: input.down,
+        fire: input.fire,
+        g: guided ? 1 : 0,
+      });
+    }
+    const dt = Math.min(20, Math.max(0, tick - mp.authTick));
     for (const p of mp.pilots) {
       if (!p.synced || p.authY == null) continue;
       const targetY = p.authY + (p.mode === "playing" ? SPEEDS[p.speed] * dt : 0);
@@ -1859,6 +1872,7 @@
 
   let roomForm = "setup";
   let roomBusy = false;
+  let mqttLoading = null;
 
   function roomError(text) {
     const el = document.getElementById("room-msg");
@@ -1898,17 +1912,12 @@
     if (mp.phase === "play") you.textContent += " Em jogo.";
     const start = document.getElementById("room-start");
     start.hidden = mp.role !== "host" || mp.phase === "play";
-    start.disabled = mp.pilots.length < 2;
+    start.disabled = mp.pilots.length < 2 || !mp.clients.some((client) => client.connected);
   }
 
-  function sendSafe(action, data, options) {
+  function sendSafe(action, data) {
     if (!action) return;
-    try {
-      const pending = options ? action.send(data, options) : action.send(data);
-      if (pending && typeof pending.then === "function") pending.catch(() => {});
-    } catch (err) {
-      /* no peer on the channel yet */
-    }
+    try { action.send(data); } catch (err) { /* broker ainda não ligado */ }
   }
 
   function sendRoster() {
@@ -1968,25 +1977,46 @@
 
   function leaveRoom() {
     const wasMatch = mp.phase === "play";
-    const room = mp.room;
+    const clients = mp.clients;
+    const topic = mp.topic;
+    if (mp.heart) {
+      clearInterval(mp.heart);
+      mp.heart = null;
+    }
     mp.waitToken = null;
+    mp.connToken = null;
     mp.phase = "off";
     mp.role = "";
-    mp.room = null;
+    mp.topic = "";
+    mp.clients = [];
     mp.pilots = [];
     mp.self = null;
     mp.hostId = "";
     mp.auth = null;
+    mp.hostSeen = 0;
+    mp.inSig = -1;
     mp.rosterIds = [];
     mp.rosterColors = [];
-    mp.accepted = new Set();
-    mp.pending = new Set();
+    mp.seen = new Map();
     mp.inputAction = null;
     mp.stateAction = null;
     mp.startAction = null;
     mp.rosterAction = null;
-    if (room) {
-      try { room.leave(); } catch (err) { /* already gone */ }
+    if (topic && mp.me) {
+      const body = JSON.stringify({ k: "bye", id: mp.me, n: ++mp.seq });
+      for (const client of clients) {
+        try {
+          if (client.connected) {
+            client.publish(topic, body, () => {
+              try { client.end(true); } catch (err) { /* already gone */ }
+            });
+          } else {
+            client.end(true);
+          }
+        } catch (err) {
+          try { client.end(true); } catch (e) { /* already gone */ }
+        }
+      }
     }
     if (wasMatch || mode !== "title") resetTitle();
     roomForm = "setup";
@@ -2001,11 +2031,360 @@
     return code;
   }
 
+  // HTTP não tem crypto.subtle, e WebRTC entre duas redes para sem TURN.
+  // O broker só entrega as mensagens. A partida fica no navegador de quem abriu a sala.
+  const ROOM_BROKERS = [
+    "wss://broker.hivemq.com:8884/mqtt",
+    "wss://broker.emqx.io:8084/mqtt",
+  ];
+
+  function sha256Hex(text) {
+    function rotr(n, x) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
+    const K = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ]);
+    const bytes = new TextEncoder().encode(text);
+    const bitLen = bytes.length * 8;
+    const extra = (56 - ((bytes.length + 1) % 64) + 64) % 64;
+    const buf = new Uint8Array(bytes.length + 1 + extra + 8);
+    buf.set(bytes);
+    buf[bytes.length] = 0x80;
+    const view = new DataView(buf.buffer);
+    view.setUint32(buf.length - 8, Math.floor(bitLen / 0x100000000));
+    view.setUint32(buf.length - 4, bitLen >>> 0);
+    let h0 = 0x6a09e667;
+    let h1 = 0xbb67ae85;
+    let h2 = 0x3c6ef372;
+    let h3 = 0xa54ff53a;
+    let h4 = 0x510e527f;
+    let h5 = 0x9b05688c;
+    let h6 = 0x1f83d9ab;
+    let h7 = 0x5be0cd19;
+    const w = new Uint32Array(64);
+    for (let i = 0; i < buf.length; i += 64) {
+      for (let t = 0; t < 16; t++) w[t] = view.getUint32(i + t * 4);
+      for (let t = 16; t < 64; t++) {
+        const s0 = rotr(7, w[t - 15]) ^ rotr(18, w[t - 15]) ^ (w[t - 15] >>> 3);
+        const s1 = rotr(17, w[t - 2]) ^ rotr(19, w[t - 2]) ^ (w[t - 2] >>> 10);
+        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) >>> 0;
+      }
+      let a = h0;
+      let b = h1;
+      let c = h2;
+      let d = h3;
+      let e = h4;
+      let f = h5;
+      let g = h6;
+      let h = h7;
+      for (let t = 0; t < 64; t++) {
+        const s1 = rotr(6, e) ^ rotr(11, e) ^ rotr(25, e);
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (h + s1 + ch + K[t] + w[t]) >>> 0;
+        const s0 = rotr(2, a) ^ rotr(13, a) ^ rotr(22, a);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (s0 + maj) >>> 0;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) >>> 0;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0;
+      h1 = (h1 + b) >>> 0;
+      h2 = (h2 + c) >>> 0;
+      h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0;
+      h5 = (h5 + f) >>> 0;
+      h6 = (h6 + g) >>> 0;
+      h7 = (h7 + h) >>> 0;
+    }
+    return [h0, h1, h2, h3, h4, h5, h6, h7].map((v) => v.toString(16).padStart(8, "0")).join("");
+  }
+
+  function topicFor(code, password) {
+    return "riverplane/" + code + "/" + sha256Hex(password).slice(0, 16);
+  }
+
+  function payloadText(buf) {
+    if (typeof buf === "string") return buf;
+    return new TextDecoder().decode(buf);
+  }
+
+  function publish(msg) {
+    if (mp.phase === "off" || !mp.clients.length) return;
+    msg.id = mp.me;
+    msg.n = ++mp.seq;
+    const body = JSON.stringify(msg);
+    for (const client of mp.clients) {
+      if (!client.connected) continue;
+      try { client.publish(mp.topic, body); } catch (err) { /* socket caiu */ }
+    }
+  }
+
+  function makeActions() {
+    mp.inputAction = { send(data) { publish(Object.assign({ k: "in" }, data)); } };
+    mp.stateAction = { send(data) { publish(Object.assign({ k: "st" }, data)); } };
+    mp.startAction = { send() { publish({ k: "go" }); } };
+    mp.rosterAction = { send(data) { publish(Object.assign({ k: "ls" }, data)); } };
+  }
+
+  function noteGuest(id) {
+    if (mp.pilots.some((p) => p.id === id)) {
+      mp.seen.set(id, Date.now());
+      return;
+    }
+    if (mp.pilots.length >= 3) {
+      publish({ k: "full", to: id });
+      return;
+    }
+    mp.seen.set(id, Date.now());
+    const p = makePilot(id, freeColor());
+    if (mp.phase === "play") {
+      p.checkpoint = mp.self ? mp.self.checkpoint : 0;
+      p.worldY = mp.self ? Math.max(40, mp.self.worldY - 48) : 40;
+      p.fuel = 1;
+      p.lives = 3;
+      p.score = 0;
+      p.speed = 1;
+      p.mode = "playing";
+      p.x = channelCenter(geometryAt(p.worldY + 4));
+    }
+    mp.pilots.push(p);
+    sendRoster();
+    showPanels();
+  }
+
+  function onPeerGone(peerId) {
+    mp.seen.delete(peerId);
+    const wasHere = mp.pilots.some((p) => p.id === peerId);
+    mp.pilots = mp.pilots.filter((p) => p.id !== peerId);
+    if (mp.role === "guest" && peerId === mp.hostId && mp.phase !== "off") {
+      showToast("SALA CAIU");
+      leaveRoom();
+      return;
+    }
+    if (mp.role === "host" && wasHere) sendRoster();
+    showPanels();
+  }
+
+  function onRoomMessage(msg) {
+    if (!msg || typeof msg.id !== "string" || msg.id === mp.me || msg.id.length > 32) return;
+    if (typeof msg.n !== "number" || !Number.isFinite(msg.n)) return;
+    if (mp.phase !== "lobby" && mp.phase !== "play") return;
+    const prev = mp.lastN.get(msg.id) || 0;
+    if (msg.n <= prev) return;
+    mp.lastN.set(msg.id, msg.n);
+    if (msg.k === "full" && msg.to === mp.me && mp.role === "guest") {
+      if (rosterRows().some((row) => row.id === mp.me)) return;
+      leaveRoom();
+      roomError("Sala cheia.");
+      return;
+    }
+    if (msg.k === "bye") {
+      onPeerGone(msg.id);
+      return;
+    }
+    if (msg.k === "hi") {
+      if (msg.role === "host" && mp.role === "guest") {
+        mp.hostId = msg.id;
+        mp.hostSeen = Date.now();
+        showPanels();
+      } else if (msg.role === "guest" && mp.role === "host") {
+        noteGuest(msg.id);
+      }
+      return;
+    }
+    if (msg.k === "ls" && mp.role === "guest") {
+      mp.hostId = msg.id;
+      mp.hostSeen = Date.now();
+      mp.rosterIds = (msg.ids || []).slice(0, 3);
+      mp.rosterColors = (msg.colors || []).slice(0, 3);
+      if (msg.phase === "play") beginMatchLocal();
+      showPanels();
+      return;
+    }
+    if (msg.k === "go" && mp.role === "guest") {
+      mp.hostId = msg.id;
+      mp.hostSeen = Date.now();
+      beginMatchLocal();
+      return;
+    }
+    if (msg.k === "st" && mp.role === "guest") {
+      mp.hostId = msg.id;
+      mp.hostSeen = Date.now();
+      if (mp.phase !== "play" && (msg.p || []).some((p) => p.id === mp.me)) beginMatchLocal();
+      applyState(msg);
+      return;
+    }
+    if (msg.k === "in" && mp.role === "host") {
+      const p = mp.pilots.find((item) => item.id === msg.id);
+      if (!p) return;
+      mp.seen.set(msg.id, Date.now());
+      p.input = {
+        left: !!msg.left,
+        right: !!msg.right,
+        up: !!msg.up,
+        down: !!msg.down,
+        fire: !!msg.fire,
+      };
+      p.guided = !!msg.g;
+    }
+  }
+
+  function connectBroker(url, token) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let client;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { if (client) client.end(true); } catch (e) { /* already closed */ }
+        reject(err instanceof Error ? err : new Error("mqtt"));
+      };
+      const timer = setTimeout(() => fail(new Error("timeout")), 8000);
+      try {
+        client = mp.mqtt.connect(url, {
+          clientId: "rp" + mp.me.slice(0, 15) + (url.indexOf("emqx") >= 0 ? "e" : "h"),
+          clean: true,
+          reconnectPeriod: 3000,
+          connectTimeout: 7000,
+          keepalive: 25,
+          protocolVersion: 4,
+          resubscribe: true,
+        });
+      } catch (err) {
+        fail(err);
+        return;
+      }
+      client.on("error", () => {
+        /* O tempo de espera cobre o broker que não responde. */
+      });
+      client.on("message", (_topic, buf) => {
+        let parsed;
+        try { parsed = JSON.parse(payloadText(buf)); } catch (e) { return; }
+        try { onRoomMessage(parsed); } catch (e) { /* mensagem fora do formato */ }
+      });
+      client.once("connect", () => {
+        client.subscribe(mp.topic, { qos: 0 }, (err) => {
+          if (err) return fail(err);
+          if (settled) return;
+          if (mp.connToken !== token) return fail(new Error("left"));
+          settled = true;
+          clearTimeout(timer);
+          mp.clients.push(client);
+          resolve(client);
+        });
+      });
+    });
+  }
+
+  function connectBrokers(token) {
+    return new Promise((resolve, reject) => {
+      let left = ROOM_BROKERS.length;
+      let opened = false;
+      for (const url of ROOM_BROKERS) {
+        connectBroker(url, token).then(() => {
+          left--;
+          if (!opened) {
+            opened = true;
+            resolve();
+          }
+        }).catch(() => {
+          left--;
+          if (!opened && left === 0) reject(new Error("net"));
+        });
+      }
+    });
+  }
+
+  function startHeart() {
+    if (mp.heart) clearInterval(mp.heart);
+    mp.beat = 0;
+    const beat = () => {
+      if (mp.phase === "off") return;
+      publish({ k: "hi", role: mp.role });
+      mp.beat++;
+      const now = Date.now();
+      if (mp.role === "host") {
+        if (mp.beat % 2 === 0) sendRoster();
+        const gone = [];
+        for (const [id, seenAt] of mp.seen) {
+          if (now - seenAt > 12000) gone.push(id);
+        }
+        if (!gone.length) return;
+        for (const id of gone) mp.seen.delete(id);
+        mp.pilots = mp.pilots.filter((p) => !gone.includes(p.id));
+        sendRoster();
+        showPanels();
+        return;
+      }
+      const inRoom = rosterRows().some((row) => row.id === mp.me);
+      if (mp.hostSeen && inRoom && now - mp.hostSeen > 12000) {
+        showToast("SALA CAIU");
+        leaveRoom();
+      }
+    };
+    beat();
+    mp.heart = setInterval(beat, 1000);
+  }
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => {
+        script.remove();
+        reject(new Error("mqtt"));
+      };
+      document.head.appendChild(script);
+    });
+  }
+
   async function loadNet() {
-    if (mp.joinRoom) return;
-    const mod = await import("https://esm.run/@trystero-p2p/mqtt@0.26.0");
-    mp.joinRoom = mod.joinRoom;
-    mp.me = mod.selfId;
+    if (mp.mqtt && mp.me) return;
+    if (!mqttLoading) {
+      mqttLoading = (async () => {
+        const srcs = [
+          "https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js",
+          "https://unpkg.com/mqtt@5.16.0/dist/mqtt.min.js",
+        ];
+        let last = new Error("mqtt");
+        for (const src of srcs) {
+          try {
+            await loadScript(src);
+            const lib = window.mqtt && (window.mqtt.connect ? window.mqtt : window.mqtt.default);
+            if (lib && lib.connect) return lib;
+          } catch (err) {
+            last = err;
+          }
+        }
+        throw last;
+      })();
+    }
+    try {
+      mp.mqtt = await mqttLoading;
+    } catch (err) {
+      mqttLoading = null;
+      throw err;
+    }
+    if (!mp.me) {
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      mp.me = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    }
   }
 
   function freeColor() {
@@ -2018,127 +2397,51 @@
     if (roomBusy || mp.phase !== "off") return;
     roomBusy = true;
     roomError("");
+    const token = {};
     try {
-    await loadNet();
-    resetTitle();
-    mp.role = role;
-    mp.code = code;
-    mp.password = password;
-    mp.phase = "lobby";
-    mp.hostId = role === "host" ? mp.me : "";
-    mp.accepted = new Set();
-    mp.pending = new Set();
-    mp.hadState = false;
-    mp.rosterIds = [];
-    mp.rosterColors = [];
-    mp.pilots = role === "host" ? [makePilot(mp.me, 0)] : [];
-    mp.self = role === "host" ? mp.pilots[0] : null;
-    mp.room = mp.joinRoom({ appId: "river-plane", password }, "rp-" + code, {
-      onJoinError() {
-        if (mp.role !== "guest" || mp.phase === "off") return;
-        const rows = rosterRows();
-        if (mp.hostId && rows.some((row) => row.id === mp.me)) return;
-        leaveRoom();
-        roomError("Não entrou. Senha errada, sala cheia ou sem ligação direta.");
-      },
-      onPeerHandshake: async (peerId, send, receive, isInitiator) => {
-        if (mp.role === "host" && mp.accepted.size + mp.pending.size >= 2) throw new Error("cheia");
-        if (mp.role === "host") mp.pending.add(peerId);
-        try {
-          const mine = { role: mp.role };
-          let theirs;
-          if (isInitiator) {
-            await send(mine);
-            theirs = (await receive()).data;
-          } else {
-            theirs = (await receive()).data;
-            await send(mine);
-          }
-          if (theirs && theirs.role === "host") mp.hostId = peerId;
-        } catch (err) {
-          mp.pending.delete(peerId);
-          throw err;
-        }
-      },
-    });
-    mp.inputAction = mp.room.makeAction("in");
-    mp.stateAction = mp.room.makeAction("st");
-    mp.startAction = mp.room.makeAction("go");
-    mp.rosterAction = mp.room.makeAction("ls");
-    mp.inputAction.onMessage = (data, meta) => {
-      if (mp.role !== "host" || !data) return;
-      const p = mp.pilots.find((item) => item.id === meta.peerId);
-      if (!p) return;
-      p.input = {
-        left: !!data.left,
-        right: !!data.right,
-        up: !!data.up,
-        down: !!data.down,
-        fire: !!data.fire,
-      };
-      p.guided = !!data.g;
-    };
-    mp.stateAction.onMessage = (data) => {
-      if (mp.role === "guest") applyState(data);
-    };
-    mp.startAction.onMessage = () => {
-      if (mp.role === "guest") beginMatchLocal();
-    };
-    mp.rosterAction.onMessage = (data) => {
-      if (mp.role !== "guest" || !data) return;
-      mp.rosterIds = data.ids || [];
-      mp.rosterColors = data.colors || [];
-      if (data.phase === "play") beginMatchLocal();
+      await loadNet();
+      password = password.trim();
+      resetTitle();
+      mp.connToken = token;
+      mp.role = role;
+      mp.code = code;
+      mp.password = password;
+      mp.topic = topicFor(code, password);
+      mp.hostId = role === "host" ? mp.me : "";
+      mp.hadState = false;
+      mp.hostSeen = 0;
+      mp.inSig = -1;
+      mp.rosterIds = [];
+      mp.rosterColors = [];
+      mp.seen = new Map();
+      mp.lastN = new Map();
+      mp.clients = [];
+      mp.pilots = role === "host" ? [makePilot(mp.me, 0)] : [];
+      mp.self = role === "host" ? mp.pilots[0] : null;
+      mp.phase = "lobby";
+      makeActions();
       showPanels();
-    };
-    mp.room.onPeerJoin = (peerId) => {
-      mp.pending.delete(peerId);
-      if (mp.role !== "host") {
-        showPanels();
-        return;
+      roomError("Conectando…");
+      try {
+        await connectBrokers(token);
+      } catch (err) {
+        if (mp.connToken !== token || mp.phase === "off") return;
+        throw err;
       }
-      mp.accepted.add(peerId);
-      if (!mp.pilots.some((p) => p.id === peerId) && mp.pilots.length < 3) {
-        const p = makePilot(peerId, freeColor());
-        if (mp.phase === "play") {
-          p.checkpoint = mp.self ? mp.self.checkpoint : 0;
-          p.worldY = mp.self ? Math.max(40, mp.self.worldY - 48) : 40;
-          p.fuel = 1;
-          p.lives = 3;
-          p.score = 0;
-          p.speed = 1;
-          p.mode = "playing";
-          p.x = channelCenter(geometryAt(p.worldY + 4));
-        }
-        mp.pilots.push(p);
-      }
-      sendRoster();
+      if (mp.connToken !== token || mp.phase === "off") return;
+      roomError("");
       showPanels();
-    };
-    mp.room.onPeerLeave = (peerId) => {
-      mp.pending.delete(peerId);
-      mp.accepted.delete(peerId);
-      mp.pilots = mp.pilots.filter((p) => p.id !== peerId);
-      if (mp.role === "guest" && peerId === mp.hostId && mp.phase !== "off") {
-        showToast("SALA CAIU");
-        leaveRoom();
-        return;
+      startHeart();
+      if (role === "guest") {
+        const wait = {};
+        mp.waitToken = wait;
+        setTimeout(() => {
+          if (mp.waitToken !== wait || mp.phase === "off") return;
+          if (rosterRows().some((row) => row.id === mp.me)) return;
+          leaveRoom();
+          roomError("Senha errada ou a sala já fechou.");
+        }, 12000);
       }
-      if (mp.role === "host") sendRoster();
-      showPanels();
-    };
-    showPanels();
-    if (mp.role === "host") sendRoster();
-    if (role === "guest") {
-      const token = {};
-      mp.waitToken = token;
-      setTimeout(() => {
-        if (mp.waitToken !== token || mp.phase === "off") return;
-        if (rosterRows().some((row) => row.id === mp.me)) return;
-        leaveRoom();
-        roomError("Não entrou. Senha errada, sala cheia ou sem ligação direta.");
-      }, 12000);
-    }
     } finally {
       roomBusy = false;
     }
@@ -2163,8 +2466,11 @@
   }
   document.getElementById("room-create").addEventListener("submit", (ev) => {
     ev.preventDefault();
-    const password = document.getElementById("room-pass").value;
-    if (!password) return;
+    const password = document.getElementById("room-pass").value.trim();
+    if (!password) {
+      roomError("Escreva uma senha.");
+      return;
+    }
     openRoom("host", roomCode(), password).catch(() => {
       leaveRoom();
       roomError("Sem rede para abrir a sala.");
@@ -2173,7 +2479,7 @@
   document.getElementById("room-join").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const code = document.getElementById("room-code").value.trim().toUpperCase();
-    const password = document.getElementById("room-pass-join").value;
+    const password = document.getElementById("room-pass-join").value.trim();
     if (!/^[A-Z0-9]{4}$/.test(code) || !password) {
       roomError("Código de 4 letras e a senha.");
       return;

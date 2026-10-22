@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -10,44 +10,47 @@
   <main>
     <div class="tv">
       <canvas id="c" width="160" height="192" aria-label="River Plane"></canvas>
+      <footer class="mark">
+        <img src="assets/nopp-games.png" alt="nopp games" width="97" height="45">
+      </footer>
     </div>
     <section class="help">
-      <p><kbd>←</kbd><kbd>→</kbd> ou <kbd>A</kbd><kbd>D</kbd> desviam · <kbd>↑</kbd><kbd>↓</kbd> ou <kbd>W</kbd><kbd>S</kbd> mudam a velocidade · <kbd>Espaço</kbd> atira</p>
-      <p><kbd>Enter</kbd> começa · <kbd>P</kbd> pausa · <kbd>M</kbd> som · <kbd>G</kbd> tiro reto ou guiado</p>
-      <p class="scores">Navio 30 · Helicóptero 60 · Depósito 80 · Jato 100 · Ponte 500 · vida extra a cada 10.000</p>
+      <p><kbd>←</kbd><kbd>→</kbd> or <kbd>A</kbd><kbd>D</kbd> steer · <kbd>↑</kbd><kbd>↓</kbd> or <kbd>W</kbd><kbd>S</kbd> change speed · <kbd>Space</kbd> fires</p>
+      <p><kbd>Enter</kbd> starts · <kbd>P</kbd> pauses · <kbd>M</kbd> sound · <kbd>G</kbd> direct or guided fire</p>
+      <p class="scores">Ship 30 · Helicopter 60 · Fuel 80 · Jet 100 · Bridge 500 · extra life every 10,000</p>
     </section>
     <section class="room" id="room">
-      <p class="room-lead">Sala com senha, até 3 aviões. Cada um voa na própria velocidade. A aba de quem criou a sala precisa continuar aberta.</p>
+      <p class="room-lead">Password room, up to 3 planes. Each one flies at its own speed. The tab that created the room has to stay open.</p>
       <p id="room-msg" class="room-msg" hidden></p>
       <div id="room-setup">
-        <button type="button" id="room-open">Criar sala</button>
-        <button type="button" id="room-join-show">Entrar</button>
+        <button type="button" id="room-open">Create room</button>
+        <button type="button" id="room-join-show">Join</button>
       </div>
       <form id="room-create" hidden>
-        <label>Senha <input id="room-pass" type="password" maxlength="24" autocomplete="off" required></label>
-        <button type="submit">Abrir</button>
-        <button type="button" data-room-cancel>Cancelar</button>
+        <label>Password <input id="room-pass" type="password" maxlength="24" autocomplete="off" required></label>
+        <button type="submit">Open</button>
+        <button type="button" data-room-cancel>Cancel</button>
       </form>
       <form id="room-join" hidden>
-        <label>Código <input id="room-code" maxlength="4" autocomplete="off" required></label>
-        <label>Senha <input id="room-pass-join" type="password" maxlength="24" autocomplete="off" required></label>
-        <button type="submit">Entrar</button>
-        <button type="button" data-room-cancel>Cancelar</button>
+        <label>Code <input id="room-code" maxlength="4" autocomplete="off" required></label>
+        <label>Password <input id="room-pass-join" type="password" maxlength="24" autocomplete="off" required></label>
+        <button type="submit">Join</button>
+        <button type="button" data-room-cancel>Cancel</button>
       </form>
       <div id="room-lobby" hidden>
-        <p>Código <strong id="room-code-show"></strong></p>
+        <p>Code <strong id="room-code-show"></strong></p>
         <p id="room-you"></p>
         <ul id="room-list"></ul>
-        <button type="button" id="room-start" hidden>Começar</button>
-        <button type="button" id="room-leave">Sair</button>
+        <button type="button" id="room-start" hidden>Start</button>
+        <button type="button" id="room-leave">Leave</button>
       </div>
     </section>
-    <div class="pad" aria-label="Controles de toque">
-      <button type="button" data-hold="left" aria-label="Esquerda">◀</button>
-      <button type="button" data-hold="down" aria-label="Frear">▼</button>
-      <button type="button" data-hold="right" aria-label="Direita">▶</button>
-      <button type="button" data-hold="up" aria-label="Acelerar">▲</button>
-      <button type="button" data-hold="fire" class="fire" aria-label="Atirar">TIRO</button>
+    <div class="pad" aria-label="Touch controls">
+      <button type="button" data-hold="left" aria-label="Left">◀</button>
+      <button type="button" data-hold="down" aria-label="Brake">▼</button>
+      <button type="button" data-hold="right" aria-label="Right">▶</button>
+      <button type="button" data-hold="up" aria-label="Accelerate">▲</button>
+      <button type="button" data-hold="fire" class="fire" aria-label="Fire">FIRE</button>
     </div>
   </main>
   <script src="js/game.js"></script>

@@ -219,7 +219,7 @@
   let touchDownPulse = false;
 
   const PILOT_COLOR = ["#E8E230", "#5EE7F5", "#F2A24A"];
-  const PILOT_NAME = ["Amarelo", "Azul", "Laranja"];
+  const PILOT_NAME = ["Yellow", "Blue", "Orange"];
   const mp = {
     phase: "off",
     role: "",
@@ -1627,13 +1627,13 @@
     }
     if (mode === "title") {
       drawCentered("RIVER PLANE", 8, 2, COL.yellow, true);
-      if (mp.phase === "lobby") drawCentered("NA SALA", 30, 1, COL.white, true);
+      if (mp.phase === "lobby") drawCentered("IN ROOM", 30, 1, COL.white, true);
       else if (Math.floor(tick / 30) % 2 === 0) drawCentered("PRESS FIRE", 30, 1, COL.white, true);
-      drawCentered(guided ? "TIRO GUIADO" : "TIRO RETO", 42, 1, COL.white, true);
+      drawCentered(guided ? "GUIDED" : "DIRECT", 42, 1, COL.white, true);
     } else if (mp.phase === "play" && mp.self && mp.self.mode === "over") {
-      drawCentered("VOCE CAIU", 58, 1, COL.yellow, true);
+      drawCentered("DOWNED", 58, 1, COL.yellow, true);
     } else if (mode === "paused") {
-      drawCentered("PAUSA", 70, 2, COL.yellow, true);
+      drawCentered("PAUSED", 70, 2, COL.yellow, true);
     } else if (mode === "over") {
       drawCentered("GAME OVER", 58, 2, COL.yellow, true);
       drawCentered("SCORE " + String(score).padStart(6, "0"), 80, 1, COL.white, true);
@@ -1802,7 +1802,7 @@
       }
     }
     if (e.code === "KeyP" && !e.repeat) {
-      if (mp.phase === "play") showToast("SEM PAUSA");
+      if (mp.phase === "play") showToast("NO PAUSE");
       else if (mode === "playing") mode = "paused";
       else if (mode === "paused") mode = "playing";
     }
@@ -1810,12 +1810,12 @@
       muted = !muted;
       localStorage.setItem("riverraid-muted", muted ? "1" : "0");
       sfx.setMuted(muted);
-      showToast(muted ? "SEM SOM" : "SOM");
+      showToast(muted ? "MUTED" : "SOUND");
     }
     if ((e.code === "KeyG" || e.code === "F4") && !e.repeat) {
       guided = !guided;
       localStorage.setItem("riverraid-guided", guided ? "1" : "0");
-      showToast(guided ? "TIRO GUIADO" : "TIRO RETO");
+      showToast(guided ? "GUIDED" : "DIRECT");
     }
   });
 
@@ -1903,13 +1903,13 @@
     for (const row of rows) {
       const li = document.createElement("li");
       const name = PILOT_NAME[row.color] || PILOT_NAME[0];
-      li.textContent = name + (row.id === mp.me ? " (você)" : "");
+      li.textContent = name + (row.id === mp.me ? " (you)" : "");
       list.appendChild(li);
     }
     const me = rows.find((row) => row.id === mp.me);
     const you = document.getElementById("room-you");
-    you.textContent = me ? "Você é o avião " + (PILOT_NAME[me.color] || PILOT_NAME[0]).toLowerCase() + "." : "Conectando…";
-    if (mp.phase === "play") you.textContent += " Em jogo.";
+    you.textContent = me ? "You are the " + (PILOT_NAME[me.color] || PILOT_NAME[0]).toLowerCase() + " plane." : "Connecting…";
+    if (mp.phase === "play") you.textContent += " In play.";
     const start = document.getElementById("room-start");
     start.hidden = mp.role !== "host" || mp.phase === "play";
     start.disabled = mp.pilots.length < 2 || !mp.clients.some((client) => client.connected);
@@ -1917,7 +1917,7 @@
 
   function sendSafe(action, data) {
     if (!action) return;
-    try { action.send(data); } catch (err) { /* broker ainda não ligado */ }
+    try { action.send(data); } catch (err) { /* broker not connected yet */ }
   }
 
   function sendRoster() {
@@ -2031,8 +2031,8 @@
     return code;
   }
 
-  // HTTP não tem crypto.subtle, e WebRTC entre duas redes para sem TURN.
-  // O broker só entrega as mensagens. A partida fica no navegador de quem abriu a sala.
+  // Plain HTTP has no crypto.subtle, and WebRTC between two networks stalls without TURN.
+  // The broker only delivers messages. The match stays in the browser that opened the room.
   const ROOM_BROKERS = [
     "wss://broker.hivemq.com:8884/mqtt",
     "wss://broker.emqx.io:8084/mqtt",
@@ -2127,7 +2127,7 @@
     const body = JSON.stringify(msg);
     for (const client of mp.clients) {
       if (!client.connected) continue;
-      try { client.publish(mp.topic, body); } catch (err) { /* socket caiu */ }
+      try { client.publish(mp.topic, body); } catch (err) { /* socket dropped */ }
     }
   }
 
@@ -2169,7 +2169,7 @@
     const wasHere = mp.pilots.some((p) => p.id === peerId);
     mp.pilots = mp.pilots.filter((p) => p.id !== peerId);
     if (mp.role === "guest" && peerId === mp.hostId && mp.phase !== "off") {
-      showToast("SALA CAIU");
+      showToast("ROOM GONE");
       leaveRoom();
       return;
     }
@@ -2187,7 +2187,7 @@
     if (msg.k === "full" && msg.to === mp.me && mp.role === "guest") {
       if (rosterRows().some((row) => row.id === mp.me)) return;
       leaveRoom();
-      roomError("Sala cheia.");
+      roomError("Room is full.");
       return;
     }
     if (msg.k === "bye") {
@@ -2268,12 +2268,12 @@
         return;
       }
       client.on("error", () => {
-        /* O tempo de espera cobre o broker que não responde. */
+        /* The wait covers a broker that does not answer. */
       });
       client.on("message", (_topic, buf) => {
         let parsed;
         try { parsed = JSON.parse(payloadText(buf)); } catch (e) { return; }
-        try { onRoomMessage(parsed); } catch (e) { /* mensagem fora do formato */ }
+        try { onRoomMessage(parsed); } catch (e) { /* message in the wrong shape */ }
       });
       client.once("connect", () => {
         client.subscribe(mp.topic, { qos: 0 }, (err) => {
@@ -2331,7 +2331,7 @@
       }
       const inRoom = rosterRows().some((row) => row.id === mp.me);
       if (mp.hostSeen && inRoom && now - mp.hostSeen > 12000) {
-        showToast("SALA CAIU");
+        showToast("ROOM GONE");
         leaveRoom();
       }
     };
@@ -2421,7 +2421,7 @@
       mp.phase = "lobby";
       makeActions();
       showPanels();
-      roomError("Conectando…");
+      roomError("Connecting…");
       try {
         await connectBrokers(token);
       } catch (err) {
@@ -2439,7 +2439,7 @@
           if (mp.waitToken !== wait || mp.phase === "off") return;
           if (rosterRows().some((row) => row.id === mp.me)) return;
           leaveRoom();
-          roomError("Senha errada ou a sala já fechou.");
+          roomError("Wrong password, or the room has already closed.");
         }, 12000);
       }
     } finally {
@@ -2468,12 +2468,12 @@
     ev.preventDefault();
     const password = document.getElementById("room-pass").value.trim();
     if (!password) {
-      roomError("Escreva uma senha.");
+      roomError("Enter a password.");
       return;
     }
     openRoom("host", roomCode(), password).catch(() => {
       leaveRoom();
-      roomError("Sem rede para abrir a sala.");
+      roomError("No network to open the room.");
     });
   });
   document.getElementById("room-join").addEventListener("submit", (ev) => {
@@ -2481,12 +2481,12 @@
     const code = document.getElementById("room-code").value.trim().toUpperCase();
     const password = document.getElementById("room-pass-join").value.trim();
     if (!/^[A-Z0-9]{4}$/.test(code) || !password) {
-      roomError("Código de 4 letras e a senha.");
+      roomError("A 4-letter code and the password.");
       return;
     }
     openRoom("guest", code, password).catch(() => {
       leaveRoom();
-      roomError("Sem rede para entrar na sala.");
+      roomError("No network to join the room.");
     });
   });
   document.getElementById("room-start").addEventListener("click", beginMatchHost);

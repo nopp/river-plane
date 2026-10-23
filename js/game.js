@@ -126,22 +126,22 @@
       "..============..",
     ],
     fuel: [
-      "RRRRRRRRRRRR",
-      "RRRRRRRRRRRR",
-      "WWWWWWWWWWWW",
-      "WWWWWWWWWWWW",
-      "WWWWWWWWWWWW",
-      "RRRRRRRRRRRR",
-      "RRRRRRRRRRRR",
-      "WWWWWWWWWWWW",
-      "WWWWWWWWWWWW",
-      "WWWWWWWWWWWW",
-      "RRRRRRRRRRRR",
-      "RRRRRRRRRRRR",
-      "WWWWWWWWWWWW",
-      "WWWWWWWWWWWW",
-      "RRRRRRRRRRRR",
-      "RRRRRRRRRRRR",
+      "RRRRRRRRRRRRRRRRR",
+      "RRRRRRRRRRRRRRRRR",
+      "WWWWWWWWWWWWWWWWW",
+      "WWWWWWWWWWWWWWWWW",
+      "WWWWWWWWWWWWWWWWW",
+      "RRRRRRRRRRRRRRRRR",
+      "RRRRRRRRRRRRRRRRR",
+      "WWWWWWWWWWWWWWWWW",
+      "WWWWWWWWWWWWWWWWW",
+      "WWWWWWWWWWWWWWWWW",
+      "RRRRRRRRRRRRRRRRR",
+      "RRRRRRRRRRRRRRRRR",
+      "WWWWWWWWWWWWWWWWW",
+      "WWWWWWWWWWWWWWWWW",
+      "RRRRRRRRRRRRRRRRR",
+      "RRRRRRRRRRRRRRRRR",
     ],
     ejet: [
       "....##....",
@@ -310,7 +310,37 @@
       return c;
     }
     const heliPaint = (ch) => (ch === "D" ? COL.heliDark : ch === "H" ? "#F4F4F8" : ch === "+" ? "#242C44" : null);
-    return {
+    function stampFuel(c) {
+      const g = c.getContext("2d");
+      const img = g.getImageData(0, 0, c.width, c.height);
+      const d = img.data;
+      const word = "FUEL";
+      const tw = word.length * 4 - 1;
+      const ox = Math.round((c.width - tw) / 2);
+      const oy = Math.round((c.height - 5) / 2);
+      function put(x, y, hex) {
+        const i = (y * c.width + x) * 4;
+        d[i] = parseInt(hex.slice(1, 3), 16);
+        d[i + 1] = parseInt(hex.slice(3, 5), 16);
+        d[i + 2] = parseInt(hex.slice(5, 7), 16);
+        d[i + 3] = 255;
+      }
+      for (let y = oy - 1; y <= oy + 5; y++) {
+        for (let x = 0; x < c.width; x++) put(x, y, COL.roof);
+      }
+      let cx = ox;
+      for (const ch of word) {
+        const rows = FONT[ch];
+        for (let yy = 0; yy < rows.length; yy++) {
+          for (let xx = 0; xx < rows[yy].length; xx++) {
+            if (rows[yy][xx] === "1") put(cx + xx, oy + yy, COL.yellow);
+          }
+        }
+        cx += 4;
+      }
+      g.putImageData(img, 0, 0);
+    }
+    const out = {
       jet: paint(SPRITE_ROWS.jet, (ch) => (ch === "#" ? COL.jet : ch === "+" ? "#8A7010" : null)),
       heliA: paint(SPRITE_ROWS.heliA, heliPaint),
       heliB: paint(SPRITE_ROWS.heliB, heliPaint),
@@ -320,6 +350,8 @@
       house: paint(SPRITE_ROWS.house, (ch) => (ch === "#" ? COL.white : null)),
       tree: paint(SPRITE_ROWS.tree, (ch) => (ch === "#" ? COL.tree : null)),
     };
+    stampFuel(out.fuel);
+    return out;
   }
 
   // House needs a black roof. Repaint properly after the generic builder.
